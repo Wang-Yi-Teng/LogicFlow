@@ -119,17 +119,7 @@ export class PoolElements {
   }
 
   addNodeToGroup = (node: LogicFlow.NodeData) => {
-    // 1. 如果该节点之前已经有泳道了，则将其从之前的泳道移除
     const preLaneId = this.nodeLaneMap.get(node.id)
-    if (preLaneId) {
-      const lane = this.lf.getNodeModelById(preLaneId) as LaneModel
-
-      lane.removeChild(node.id)
-      this.nodeLaneMap.delete(node.id)
-      lane.setAllowAppendChild(false)
-    }
-
-    // 2. 然后再判断这个节点是否在某个泳道范围内，如果是，则将其添加到对应的泳道中
     const nodeModel = this.lf.getNodeModelById(node.id)
     const bounds = nodeModel?.getBounds()
 
@@ -154,24 +144,37 @@ export class PoolElements {
       const lane = this.getLaneByBounds(bounds, node)
       if (lane) {
         const isAllowAppendIn = lane.isAllowAppendIn(node)
-        if (isAllowAppendIn) {
-          lane.addChild(node.id)
-          // 建立节点与 lane 的映射关系放在了 lane.addChild 触发的事件中，与直接调用 addChild 的行为保持一致
-          lane.setAllowAppendChild(false)
-          const nodeModel = this.lf.getNodeModelById(node.id)
-          nodeModel?.setProperties({
-            ...nodeModel.properties,
-            parent: lane.id,
-            // relativeDistanceX: nodeModel.x - lane.x,
-            // relativeDistanceY: nodeModel.y - lane.y,
-          })
-        } else {
+        if (!isAllowAppendIn) {
           // 抛出不允许插入的事件
           this.lf.emit('lane:not-allowed', {
             lane: lane.getData(),
             node,
           })
+          return
         }
+
+        if (preLaneId && preLaneId !== lane.id) {
+          const preLane = this.lf.getNodeModelById(preLaneId) as LaneModel
+          preLane?.removeChild(node.id)
+          this.nodeLaneMap.delete(node.id)
+          preLane?.setAllowAppendChild(false)
+        }
+
+        lane.addChild(node.id)
+        // 建立节点与 lane 的映射关系放在了 lane.addChild 触发的事件中，与直接调用 addChild 的行为保持一致
+        lane.setAllowAppendChild(false)
+        nodeModel.setProperties({
+          ...nodeModel.properties,
+          parent: lane.id,
+          // relativeDistanceX: nodeModel.x - lane.x,
+          // relativeDistanceY: nodeModel.y - lane.y,
+        })
+      } else if (preLaneId) {
+        const preLane = this.lf.getNodeModelById(preLaneId) as LaneModel
+
+        preLane?.removeChild(node.id)
+        this.nodeLaneMap.delete(node.id)
+        preLane?.setAllowAppendChild(false)
       }
     }
   }
@@ -370,6 +373,7 @@ export class PoolElements {
   }
 
   onGraphRendered = ({ data }: CallbackArgs<'graph:rendered'>) => {
+    this.nodeLaneMap.clear()
     forEach(data.nodes, (node) => {
       if (node.children) {
         forEach(node.children, (childId) => {
