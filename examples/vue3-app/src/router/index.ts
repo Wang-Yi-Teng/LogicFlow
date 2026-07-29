@@ -33,6 +33,11 @@ const router = createRouter({
       path: '/nested-transform',
       name: 'nestedTransform',
       component: () => import('../views/NestedTransformView.vue')
+    },
+    {
+      path: '/selection-pool-conflict',
+      name: 'selectionPoolConflict',
+      component: () => import('../views/SelectionPoolConflictView.vue')
     }
   ]
 })

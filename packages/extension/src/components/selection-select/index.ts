@@ -259,6 +259,26 @@ export class SelectionSelect {
       }
     }
   }
+
+  private getParentContainerByNodeId(
+    nodeId: string,
+  ): LogicFlow.GraphElement | undefined {
+    const { dynamicGroup, group } = this.lf.graphModel
+
+    if (typeof group?.getNodeGroup === 'function') {
+      const legacyGroup = group.getNodeGroup(nodeId)
+      if (legacyGroup) return legacyGroup
+    }
+
+    if (typeof dynamicGroup?.getGroupByNodeId === 'function') {
+      return dynamicGroup.getGroupByNodeId(nodeId)
+    }
+
+    if (typeof dynamicGroup?.getLaneByNodeId === 'function') {
+      return dynamicGroup.getLaneByNodeId(nodeId)
+    }
+  }
+
   private drawOff = (e: PointerEvent) => {
     // 恢复原始的 stopMoveGraph 设置
     this.lf.updateEditConfig({
@@ -315,7 +335,6 @@ export class SelectionSelect {
         this.isWholeNode,
         true,
       )
-      const { dynamicGroup, group } = this.lf.graphModel
       const nonGroupedElements: typeof elements = []
       const selectedElements = this.lf.getSelectElements()
       // 同时记录节点和边的ID
@@ -325,20 +344,10 @@ export class SelectionSelect {
       ])
 
       elements.forEach((element) => {
-        // 如果节点属于分组，则不选中节点，此处兼容旧版 Group 插件
-        if (group) {
-          const elementGroup = group.getNodeGroup(element.id)
-          if (elements.includes(elementGroup)) {
-            // 当被选中的元素的父分组被选中时，不选中该元素
-            return
-          }
-        }
-        if (dynamicGroup) {
-          const elementGroup = dynamicGroup.getGroupByNodeId(element.id)
-          if (elements.includes(elementGroup)) {
-            // 当被选中的元素的父分组被选中时，不选中该元素
-            return
-          }
+        const parentContainer = this.getParentContainerByNodeId(element.id)
+        if (parentContainer && elements.includes(parentContainer)) {
+          // 当被选中的元素的父容器被选中时，不选中该元素
+          return
         }
         // 在独占模式下，如果元素已经被选中，则取消选中
         if (this.exclusiveMode && selectedIds.has(element.id)) {

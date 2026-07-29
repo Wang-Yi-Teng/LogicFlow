@@ -37,6 +37,11 @@ import { RouterView } from 'vue-router'
           <el-icon><TrendCharts /></el-icon>
           <span>NestedTransform</span>
         </el-menu-item>
+
+        <el-menu-item index="/selection-pool-conflict">
+          <el-icon><TrendCharts /></el-icon>
+          <span>#2418 Selection</span>
+        </el-menu-item>
       </el-menu>
     </div>
   </header>
