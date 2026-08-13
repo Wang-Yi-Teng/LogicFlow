@@ -119,7 +119,6 @@ export class PoolView extends DynamicGroupNode {
     const poolCount = graphModel.nodes.filter(
       (node) => String(node.type) === 'pool',
     ).length
-    // 设置一个足够低的z-index，确保泳池在所有节点的最底层
     model.setZIndex(-((poolCount - index) * 100))
     if (
       !model.properties?.children?.length &&

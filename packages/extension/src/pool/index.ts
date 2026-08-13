@@ -649,14 +649,34 @@ export class PoolElements {
     return getLaneModelsByIds(this.getLaneBlockContext(), laneIds)
   }
 
+  /**
+   * 根据来源 Pool id 获取 Pool 模型。
+   *
+   * @param poolIds 来源 Pool id 列表。
+   * @returns 可用的来源 Pool 模型列表。
+   */
   getSourcePoolsByIds(poolIds: string[]): PoolModel[] {
     return getSourcePoolsByIds(this.getLaneBlockContext(), poolIds)
   }
 
+  /**
+   * 按 Lane 当前的 parent 关系，将多选 Lane 分组到各自来源 Pool。
+   *
+   * @param lanes 参与多选拖拽的 Lane 模型列表。
+   * @returns 来源 Pool id 到 Lane 列表的映射。
+   */
   groupLanesBySourcePool(lanes: LaneModel[]) {
     return groupLanesBySourcePool(this.getLaneBlockContext(), lanes)
   }
 
+  /**
+   * 判断多个来源 Pool 的 Lane block 是否可以整体迁移到目标 Pool。
+   *
+   * @param sourcePools 参与迁移的来源 Pool 列表。
+   * @param lanesBySourcePool 各来源 Pool 对应的待迁移 Lane。
+   * @param targetPool 预览或 drop 命中的目标 Pool。
+   * @returns 所有来源 Pool 都满足最小 Lane 数约束时返回 true。
+   */
   canMoveLaneBlock(
     sourcePools: PoolModel[],
     lanesBySourcePool: Map<string, LaneModel[]>,
@@ -665,6 +685,62 @@ export class PoolElements {
     return canMoveLaneBlock(sourcePools, lanesBySourcePool, targetPool)
   }
 
+  /**
+   * 根据指针位置计算多选 Lane block 在目标 Pool 中的插入下标。
+   *
+   * @param pool 目标 Pool。
+   * @param lanes 当前选中的 Lane 列表。
+   * @param point 指针在画布中的坐标。
+   * @returns 基于拖拽开始时槽位快照计算出的插入下标。
+   */
+  getSelectionLaneInsertIndex(
+    pool: PoolModel,
+    lanes: LaneModel[],
+    point: { x: number; y: number },
+  ): number {
+    const snapshot = this.selectionLaneDragState?.sourceSlotsByPool[pool.id]
+    if (!snapshot) return pool.getLaneInsertIndex(point)
+
+    const selectedIds = new Set(lanes.map((lane) => lane.id))
+    const selectedSlots = snapshot.slots.filter((slot) =>
+      selectedIds.has(slot.laneId),
+    )
+    const axis = pool.isHorizontal ? point.y : point.x
+    const initialAxis = selectedSlots.reduce((minimum, slot) => {
+      const center = pool.isHorizontal
+        ? (slot.minY + slot.maxY) / 2
+        : (slot.minX + slot.maxX) / 2
+      return Math.min(minimum, center)
+    }, Number.POSITIVE_INFINITY)
+    const targetSlot = snapshot.slots.find(
+      (slot) =>
+        !selectedIds.has(slot.laneId) &&
+        point.x >= slot.minX &&
+        point.x <= slot.maxX &&
+        point.y >= slot.minY &&
+        point.y <= slot.maxY,
+    )
+
+    if (targetSlot) {
+      const targetIndex = snapshot.laneIds.indexOf(targetSlot.laneId)
+      // 指针进入目标槽位即切换排序；依据相对初始块的位置决定插在槽位前或后。
+      return axis < initialAxis ? targetIndex : targetIndex + 1
+    }
+
+    const bounds = pool.getBounds()
+    const minAxis = pool.isHorizontal ? bounds.minY : bounds.minX
+    const maxAxis = pool.isHorizontal ? bounds.maxY : bounds.maxX
+    if (axis <= minAxis) return 0
+    if (axis >= maxAxis) return snapshot.laneIds.length
+
+    return snapshot.laneIds.findIndex((laneId) => selectedIds.has(laneId))
+  }
+
+  /**
+   * selection 拖拽开始时记录 Lane/Pool 快照。
+   *
+   * core 会先整体移动选中节点；Pool 后续预览和 drop 都基于这里的快照修正顺序与子节点相对位置。
+   */
   onSelectionDragStart = () => {
     const lanes = this.getSelectedLaneModels()
     if (lanes.length === 0) return
@@ -712,49 +788,14 @@ export class PoolElements {
     }
   }
 
-  getSelectionLaneInsertIndex(
-    pool: PoolModel,
-    lanes: LaneModel[],
-    point: { x: number; y: number },
-  ): number {
-    const snapshot = this.selectionLaneDragState?.sourceSlotsByPool[pool.id]
-    if (!snapshot) return pool.getLaneInsertIndex(point)
-
-    const selectedIds = new Set(lanes.map((lane) => lane.id))
-    const selectedSlots = snapshot.slots.filter((slot) =>
-      selectedIds.has(slot.laneId),
-    )
-    const axis = pool.isHorizontal ? point.y : point.x
-    const initialAxis = selectedSlots.reduce((minimum, slot) => {
-      const center = pool.isHorizontal
-        ? (slot.minY + slot.maxY) / 2
-        : (slot.minX + slot.maxX) / 2
-      return Math.min(minimum, center)
-    }, Number.POSITIVE_INFINITY)
-    const targetSlot = snapshot.slots.find(
-      (slot) =>
-        !selectedIds.has(slot.laneId) &&
-        point.x >= slot.minX &&
-        point.x <= slot.maxX &&
-        point.y >= slot.minY &&
-        point.y <= slot.maxY,
-    )
-
-    if (targetSlot) {
-      const targetIndex = snapshot.laneIds.indexOf(targetSlot.laneId)
-      // 指针进入目标槽位即切换排序；依据相对初始块的位置决定插在槽位前或后。
-      return axis < initialAxis ? targetIndex : targetIndex + 1
-    }
-
-    const bounds = pool.getBounds()
-    const minAxis = pool.isHorizontal ? bounds.minY : bounds.minX
-    const maxAxis = pool.isHorizontal ? bounds.maxY : bounds.maxX
-    if (axis <= minAxis) return 0
-    if (axis >= maxAxis) return snapshot.laneIds.length
-
-    return snapshot.laneIds.findIndex((laneId) => selectedIds.has(laneId))
-  }
-
+  /**
+   * 计算多选 Lane block 预览时的完整 Lane 顺序。
+   *
+   * @param pool 目标 Pool。
+   * @param lanes 待插入的 Lane block。
+   * @param insertIndex 目标插入下标。
+   * @returns 预览状态下的 Lane id 顺序。
+   */
   getLaneBlockPreviewOrder(
     pool: PoolModel,
     lanes: LaneModel[],
@@ -771,6 +812,14 @@ export class PoolElements {
     ).contentBox
   }
 
+  /**
+   * 预览多选 Lane block 插入后的布局。
+   *
+   * @param pool 目标 Pool。
+   * @param lanes 待预览的 Lane block。
+   * @param insertIndex 目标插入下标。
+   * @returns {void} 仅更新模型布局和预览状态。
+   */
   previewLaneBlockOrder(
     pool: PoolModel,
     lanes: LaneModel[],
@@ -779,6 +828,14 @@ export class PoolElements {
     previewLaneBlockOrder(this.getLaneBlockContext(), pool, lanes, insertIndex)
   }
 
+  /**
+   * 更新多选 Lane block 的 drop 指示器。
+   *
+   * @param pool 当前命中的目标 Pool。
+   * @param lanes 待插入的 Lane block。
+   * @param insertIndex 目标插入下标。
+   * @returns {void}
+   */
   setLaneBlockDropIndicator(
     pool: PoolModel,
     lanes: LaneModel[],
@@ -808,6 +865,11 @@ export class PoolElements {
     this.setLaneBlockDropIndicator(pool, lanes, insertIndex)
   }
 
+  /**
+   * selection:drag 阶段更新多选 Lane 的落位预览。
+   *
+   * 该阶段只负责展示“如果现在松手会放在哪里”，真正落位在 selection:drop。
+   */
   updateSelectionLaneDragPreview(e?: MouseEvent | PointerEvent) {
     const state = this.selectionLaneDragState
     if (!state || !e) return
@@ -892,6 +954,13 @@ export class PoolElements {
     })
   }
 
+  /**
+   * 获取多选 Lane block 在来源 Pool 中的视觉顺序。
+   *
+   * @param lanes 参与迁移的 Lane 列表。
+   * @param targetPool 目标 Pool。
+   * @returns 按用户视觉顺序排列的 Lane 列表。
+   */
   getSelectionLaneVisualOrder(lanes: LaneModel[], targetPool: PoolModel) {
     return getSelectionLaneVisualOrder(
       lanes,
@@ -900,6 +969,12 @@ export class PoolElements {
     )
   }
 
+  /**
+   * 根据拖拽开始快照恢复多选 Lane 的子节点相对位置。
+   *
+   * @param lanes 需要恢复子节点位置的 Lane 列表。
+   * @returns {void}
+   */
   restoreSelectionLaneChildPositions(lanes: LaneModel[]) {
     restoreLaneBlockChildPositions(
       lanes,
@@ -907,6 +982,11 @@ export class PoolElements {
     )
   }
 
+  /**
+   * 多选 Lane drop 的统一出口。
+   *
+   * 同池换序、跨池迁移、非法目标归位都在这里收敛。
+   */
   finalizeSelectionLaneMove = (e?: MouseEvent | PointerEvent) => {
     const state = this.selectionLaneDragState
     if (!state) return false
@@ -960,6 +1040,7 @@ export class PoolElements {
 
     const block = this.getSelectionLaneVisualOrder(lanes, targetPool)
 
+    // 跨 Pool 迁移要先从所有来源 Pool 的 laneOrder 中移除选中块，再插入目标 Pool。
     sourcePools.forEach((sourcePool) => {
       const movedIds = new Set(
         (lanesBySourcePool.get(sourcePool.id) ?? []).map((lane) => lane.id),
@@ -1033,22 +1114,54 @@ export class PoolElements {
     )
   }
 
+  /**
+   * 保存 Pool 当前各 Lane 的几何槽位。
+   *
+   * @param pool 需要保存槽位快照的 Pool。
+   * @returns 当前 Lane 顺序对应的槽位边界列表。
+   */
   captureLaneSlotBounds(pool: PoolModel): LaneSlotBounds[] {
     return captureLaneSlotBounds(pool)
   }
 
+  /**
+   * 获取单 Lane 拖拽排序使用的槽位边界。
+   *
+   * @param pool 当前来源或目标 Pool。
+   * @returns Lane 槽位边界列表。
+   */
   getLaneSlotBounds(pool: PoolModel): LaneSlotBounds[] {
     return getLaneSlotBounds(this.getLaneDragContext(), pool)
   }
 
+  /**
+   * 获取单 Lane 拖拽时需要跟随移动的 Lane 及其子节点。
+   *
+   * @param lane 当前拖拽的 Lane。
+   * @returns 需要同步移动的节点模型列表。
+   */
   getLaneDragMembers(lane: LaneModel): BaseNodeModel[] {
     return getLaneDragMembers(this.getLaneDragContext(), lane)
   }
 
+  /**
+   * 获取与 Lane 关联、需要同步处理的边。
+   *
+   * @param lane 当前拖拽的 Lane。
+   * @returns 与 Lane 或其子节点关联的边模型列表。
+   */
   getLaneRelatedEdges(lane: LaneModel): BaseEdgeModel[] {
     return getLaneRelatedEdges(this.getLaneDragContext(), lane)
   }
 
+  /**
+   * 创建单 Lane 拖拽过程所需的初始快照。
+   *
+   * @param lane 当前拖拽的 Lane。
+   * @param sourcePool Lane 所属的来源 Pool。
+   * @param previousAxis 拖拽开始时 Lane 在 Pool 主轴上的位置。
+   * @returns 单 Lane 拖拽状态。
+   */
   createLaneDragState(
     lane: LaneModel,
     sourcePool: PoolModel,
@@ -1062,18 +1175,43 @@ export class PoolElements {
     )
   }
 
+  /**
+   * 恢复单 Lane 拖拽前的标题文本位置。
+   *
+   * @param state 单 Lane 拖拽状态快照。
+   * @returns {void}
+   */
   restoreLaneTextPositions(state: LaneDragState) {
     restoreLaneTextPositions(this.getLaneDragContext(), state)
   }
 
+  /**
+   * 设置单 Lane 拖拽期间的鼠标指针样式。
+   *
+   * @param cursor 允许或禁止 drop 时显示的指针样式；不传则恢复默认样式。
+   * @returns {void}
+   */
   setLaneDragCursor(cursor?: 'not-allowed' | 'allowed') {
     setLaneDragCursor(this.getLaneDragContext(), cursor)
   }
 
+  /**
+   * 清理指定 Pool 的 Lane drop 目标状态。
+   *
+   * @param pool 需要清理的 Pool；不传时由底层逻辑清理当前目标。
+   * @returns {void}
+   */
   clearLaneDropTarget(pool?: PoolModel) {
     clearLaneDropTarget(pool)
   }
 
+  /**
+   * 判断单 Lane 是否可以从来源 Pool 移入目标 Pool。
+   *
+   * @param sourcePool Lane 当前所属的来源 Pool。
+   * @param targetPool 预览或 drop 命中的目标 Pool。
+   * @returns 满足 Pool 约束时返回 true。
+   */
   canDropLaneIntoPool(sourcePool: PoolModel, targetPool: PoolModel) {
     return canDropLaneIntoPool(sourcePool, targetPool)
   }
@@ -1086,6 +1224,14 @@ export class PoolElements {
     syncLaneChildZIndex(this.getLaneDragContext(), lane, childId)
   }
 
+  /**
+   * 获取单 Lane 在目标 Pool 中的预览顺序。
+   *
+   * @param pool 目标 Pool。
+   * @param laneId 待移动的 Lane id。
+   * @param insertIndex 目标插入下标。
+   * @returns 预览状态下的 Lane id 顺序。
+   */
   getLanePreviewOrder(
     pool: PoolModel,
     laneId: string,
@@ -1099,22 +1245,58 @@ export class PoolElements {
     )
   }
 
+  /**
+   * 更新单 Lane 的 drop 指示器。
+   *
+   * @param pool 目标 Pool。
+   * @param laneId 待移动的 Lane id。
+   * @param insertIndex 目标插入下标。
+   * @returns {void}
+   */
   setLaneDropIndicator(pool: PoolModel, laneId: string, insertIndex: number) {
     setLaneDropIndicator(this.getLaneDragContext(), pool, laneId, insertIndex)
   }
 
+  /**
+   * 预览单 Lane 插入后的 Pool 布局。
+   *
+   * @param pool 目标 Pool。
+   * @param laneId 待移动的 Lane id。
+   * @param insertIndex 目标插入下标。
+   * @returns {void}
+   */
   previewLaneOrder(pool: PoolModel, laneId: string, insertIndex: number) {
     previewLaneOrder(this.getLaneDragContext(), pool, laneId, insertIndex)
   }
 
+  /**
+   * 根据指针位置更新单 Lane 拖拽预览。
+   *
+   * @param laneId 当前拖拽的 Lane id。
+   * @param point 指针在画布中的坐标。
+   * @returns {void}
+   */
   updateLaneDragPreview(laneId: string, point: { x: number; y: number }) {
     updateLaneDragPreview(this.getLaneDragContext(), laneId, point)
   }
 
+  /**
+   * 清理单 Lane 拖拽期间的预览布局和指示器。
+   *
+   * @returns {void}
+   */
   clearLaneDragPreview() {
     clearLaneDragPreview(this.getLaneDragContext())
   }
 
+  /**
+   * 将非法 drop 的 Lane 恢复到来源 Pool。
+   *
+   * @param lane 需要归位的 Lane。
+   * @param sourcePool Lane 原所属的 Pool。
+   * @param state 单 Lane 拖拽快照；不传时由底层逻辑按当前状态处理。
+   * @returns {void}
+   */
   returnLaneToSourcePool(
     lane: LaneModel,
     sourcePool: PoolModel,
@@ -1161,6 +1343,12 @@ export class PoolElements {
     this.activeGroups.clear()
   }
 
+  /**
+   * 完成单 Lane drop，并根据命中结果执行同池换序或跨池迁移。
+   *
+   * @param node drop 事件中的节点数据。
+   * @returns drop 被成功处理时返回 true，否则返回 false。
+   */
   finalizeLaneDrop(node?: LogicFlow.NodeData): boolean {
     return finalizeLaneDrop(this.getLaneDragContext(), node)
   }

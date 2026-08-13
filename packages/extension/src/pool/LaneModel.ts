@@ -13,6 +13,13 @@ export type LaneChildRelativePositions = Record<
   { dx: number; dy: number }
 >
 
+/**
+ * 将源 Lane 子节点的相对位置快照映射到复制后的子节点 id。
+ *
+ * @param sourcePositions 源 Lane 的子节点相对位置。
+ * @param nodeIdMap 源子节点 id 到复制子节点 id 的映射。
+ * @returns 使用复制后子节点 id 的相对位置快照。
+ */
 export function mapLaneChildRelativePositions(
   sourcePositions: LaneChildRelativePositions,
   nodeIdMap: Record<string, string>,
@@ -74,7 +81,12 @@ export class LaneModel extends DynamicGroupNodeModel {
     this.updateTextPosition()
   }
 
-  getResolvedTitlePosition() {
+  /**
+   * 解析 Lane 最终使用的标题边，优先使用 Lane 配置并兼容 Pool 方向。
+   *
+   * @returns Lane 标题所在的边。
+   */
+  getResolvedTitlePosition(): TitlePosition {
     return resolveLaneTitlePosition(
       this.properties,
       this.getPoolModel()?.properties ?? {
@@ -83,7 +95,12 @@ export class LaneModel extends DynamicGroupNodeModel {
     )
   }
 
-  getTitleTextBox() {
+  /**
+   * 获取 Lane 标题区域的几何盒。
+   *
+   * @returns 当前展开或折叠状态下的标题区域。
+   */
+  getTitleTextBox(): { x: number; y: number; width: number; height: number } {
     if (this.isCollapsed) {
       return { x: this.x, y: this.y, width: this.width, height: this.height }
     }
@@ -94,7 +111,12 @@ export class LaneModel extends DynamicGroupNodeModel {
     ).titleBox
   }
 
-  isTitleTextVerticallyCentered() {
+  /**
+   * 判断标题文本是否沿垂直方向居中。
+   *
+   * @returns Lane 标题始终垂直居中时返回 true。
+   */
+  isTitleTextVerticallyCentered(): boolean {
     return true
   }
 
@@ -104,7 +126,13 @@ export class LaneModel extends DynamicGroupNodeModel {
     return this.getPoolModel()?.isHorizontal ? 'top' : 'left'
   }
 
-  setZIndex(zIndex: number) {
+  /**
+   * Lane 默认压在普通节点下方；拖拽/选中抬层时允许临时超过默认层级。
+   *
+   * @param zIndex 期望设置的渲染层级。
+   * @returns {void}
+   */
+  setZIndex(zIndex: number): void {
     if (zIndex > this.defaultZIndex) {
       this.zIndex = zIndex
       return
@@ -124,7 +152,15 @@ export class LaneModel extends DynamicGroupNodeModel {
     }
   }
 
-  toggleCollapse(collapse?: boolean) {
+  /**
+   * 切换 Lane 折叠状态。
+   *
+   * Lane 只负责更新自身标题块尺寸，所属 Pool 再统一收口重排，避免容器尺寸被单条 Lane 抢先写回。
+   *
+   * @param collapse 指定折叠状态；不传时切换当前状态。
+   * @returns {void}
+   */
+  toggleCollapse(collapse?: boolean): void {
     const plugin = this.graphModel.dynamicGroup as any
     if (
       typeof plugin?.isCollapseAllowed === 'function' &&
@@ -149,8 +185,14 @@ export class LaneModel extends DynamicGroupNodeModel {
     }
   }
 
-  /** 已折叠 Lane 的标题边变更不改变折叠轴，仍按所属 Pool 的排列方向保留标题块。 */
-  refreshCollapsedTitleBounds() {
+  /**
+   * 刷新已折叠 Lane 的标题块尺寸。
+   *
+   * 标题边变更不改变折叠轴，仍按所属 Pool 的排列方向保留标题块。
+   *
+   * @returns {void}
+   */
+  refreshCollapsedTitleBounds(): void {
     if (!this.isCollapsed) return
 
     this.setCollapsedSizeForDirection(this.expandWidth, this.expandHeight)
@@ -163,6 +205,7 @@ export class LaneModel extends DynamicGroupNodeModel {
     expandedWidth: number,
     expandedHeight: number,
   ) {
+    // 横向 Pool 的 Lane 垂直堆叠，折叠后保留整行宽度；纵向 Pool 同理保留整列高度。
     const isHorizontalPool =
       this.getPoolModel()?.isHorizontal ??
       this.properties?.direction === 'horizontal'
@@ -171,17 +214,15 @@ export class LaneModel extends DynamicGroupNodeModel {
   }
 
   /**
-   * 获取所属泳池ID
+   * 获取所属 Pool 的 id。
    */
   getPoolId(): string | null {
     try {
-      // 检查graphModel是否存在
       if (!this.graphModel) {
         console.warn('GraphModel is not available')
         return null
       }
 
-      // 安全地获取泳池ID
       const poolModel = this.graphModel.nodes.find((node) => {
         return node.children && node.children.has(this.id)
       })
@@ -193,7 +234,7 @@ export class LaneModel extends DynamicGroupNodeModel {
   }
 
   /**
-   * 获取所属泳池模型
+   * 获取所属 Pool 模型。
    */
   getPoolModel(): any {
     try {
@@ -202,7 +243,6 @@ export class LaneModel extends DynamicGroupNodeModel {
         return null
       }
 
-      // 检查graphModel是否存在
       if (!this.graphModel) {
         console.warn('GraphModel is not available for getting pool model')
         return null
@@ -217,9 +257,12 @@ export class LaneModel extends DynamicGroupNodeModel {
   }
 
   /**
-   * 动态修改泳道属性
+   * 动态修改 Lane 的尺寸或坐标。
+   *
+   * @param attributes 需要覆盖的尺寸或坐标字段。
+   * @returns {void}
    */
-  changeAttribute({ width, height, x, y }: any) {
+  changeAttribute({ width, height, x, y }: any): void {
     if (width) this.width = width // 更新宽度
     if (height) this.height = height // 更新高度
     if (x) this.x = x // 更新X坐标
@@ -227,7 +270,7 @@ export class LaneModel extends DynamicGroupNodeModel {
   }
 
   /**
-   * 重写获取数据方法，添加泳道特定属性
+   * 序列化 Lane 数据时补充展开/折叠尺寸和方向信息。
    */
   getData(): LogicFlow.NodeData {
     const data = super.getData()
@@ -248,14 +291,20 @@ export class LaneModel extends DynamicGroupNodeModel {
     }
   }
   /**
-   * 重写 isAllowAppendIn，禁止 Lane 嵌套
+   * 禁止 Lane 嵌套到 Lane 内。
    */
   isAllowAppendIn(nodeData: LogicFlow.NodeData): boolean {
-    // 禁止 Lane 节点被添加到 Lane 中
     return String(nodeData.type) !== 'lane'
   }
 
-  getMovableChildIds() {
+  /**
+   * 获取会跟随 Lane 一起移动的子节点 id。
+   *
+   * 嵌套 Lane 或正在被 core 单独拖拽的节点不能再被重复移动。
+   *
+   * @returns 可随当前 Lane 移动的直接子节点 id 列表。
+   */
+  getMovableChildIds(): string[] {
     return Array.from(this.children).filter((nodeId: string) => {
       const nodeModel = this.graphModel.getNodeModelById(nodeId)
       return (
@@ -264,6 +313,9 @@ export class LaneModel extends DynamicGroupNodeModel {
     }) as string[]
   }
 
+  /**
+   * 记录子节点相对 Lane 中心的偏移，后续 Pool 重排后用它恢复视觉位置。
+   */
   captureChildrenRelativePositions(
     childIds: string[] = this.getMovableChildIds(),
   ): LaneChildRelativePositions {
@@ -279,7 +331,13 @@ export class LaneModel extends DynamicGroupNodeModel {
     }, {} as LaneChildRelativePositions)
   }
 
+  /**
+   * 按 Lane 中心恢复子节点的相对位置。
+   *
+   * Pool 重排、复制粘贴、非法 drop 归位都会移动 Lane；这里保证 Lane 内节点视觉位置不被二次偏移。
+   */
   restoreChildrenRelativePositions(positions: LaneChildRelativePositions) {
+    // 多数情况下所有子节点拥有相同 delta，可以批量 moveNodes；不同 delta 时再逐个归位。
     const moves = Object.entries(positions)
       .map(([childId, offset]) => {
         const child = this.graphModel.getNodeModelById(childId)
@@ -325,8 +383,10 @@ export class LaneModel extends DynamicGroupNodeModel {
   }
 
   /**
-   * 获取需要移动的节点
-   * @param groupModel
+   * 获取需要跟随 group 一起移动的节点 id。
+   *
+   * @param groupModel 当前触发分组移动查询的容器模型。
+   * @returns 未处于拖拽状态且不是 Lane 的直接子节点 id 列表。
    */
   getNodesInGroup(groupModel: DynamicGroupNodeModel): string[] {
     const nodeIds: string[] = []
@@ -349,7 +409,7 @@ export class LaneModel extends DynamicGroupNodeModel {
     return style
   }
   /**
-   * 获取文本样式
+   * 获取 Lane 标题文本样式。
    */
   getTextStyle() {
     const style = super.getTextStyle()
@@ -380,7 +440,7 @@ export class LaneModel extends DynamicGroupNodeModel {
   }
 
   /**
-   * 获取子泳道
+   * 获取当前 Lane 的子节点模型。
    */
   getSubNodes() {
     const children: any[] = []

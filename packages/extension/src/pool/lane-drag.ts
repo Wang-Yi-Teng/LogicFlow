@@ -3,6 +3,15 @@ import { filter } from 'lodash-es'
 import { LaneModel } from './LaneModel'
 import { PoolModel } from './PoolModel'
 
+/**
+ * 单个 Lane 拖拽链路的纯逻辑集合。
+ *
+ * PoolElements 负责监听 LogicFlow 事件和提供上下文能力，本文件只处理：
+ * 1. 拖拽开始时记录快照；
+ * 2. 拖拽过程中的目标 Pool、插入槽位和视觉反馈；
+ * 3. drop 时换序、跨 Pool 迁移或失败归位。
+ */
+
 export type LaneSlotBounds = {
   laneId: string
   minX: number
@@ -12,14 +21,21 @@ export type LaneSlotBounds = {
 }
 
 export type LaneDragState = {
+  /** 当前正在拖拽的 Lane。 */
   laneId: string
+  /** 拖拽开始时 Lane 所属 Pool，用于失败归位和最小泳道数校验。 */
   sourcePoolId: string
+  /** 拖拽预览阶段命中的目标 Pool；drop 时优先复用，避免鼠标抬起瞬间重新命中偏差。 */
   targetPoolId?: string
+  /** 预览阶段计算出的插入位置；drop 时优先复用。 */
   insertIndex?: number
+  /** 上一次指针所在主轴坐标，用于跨 Pool 拖入时判断插在目标槽位前还是后。 */
   previousAxis: number
+  /** 拖拽期间会临时抬高 Lane、子节点和边，结束后按这里恢复。 */
   originalRaisedElementZIndices: Record<string, number>
+  /** 无效 drop 归位时恢复边/节点文本位置，避免连线 title 被布局重算带偏。 */
   originalTextPositions: Record<string, { x: number; y: number }>
-  // 在预览布局改变泳道位置前记录槽位边界，命中判断不能依赖预览后的坐标。
+  /** 在预览布局改变泳道位置前记录槽位边界，命中判断不能依赖预览后的坐标。 */
   slotBoundsByPool: Record<string, LaneSlotBounds[]>
 }
 
@@ -30,6 +46,10 @@ const LANE_DRAG_CURSOR_CLASSES = [
 ]
 
 export type PoolLaneDragContext = {
+  /**
+   * lane-drag 不直接持有 PoolElements 实例，只通过上下文调用宿主能力。
+   * 这样单 Lane 拖拽可以被 index.ts 薄包装复用，也避免把事件监听代码搬进工具层。
+   */
   lf: LogicFlow
   getLaneDragState(): LaneDragState | undefined
   setLaneDragState(state?: LaneDragState): void
@@ -65,14 +85,28 @@ export type PoolLaneDragContext = {
   ): void
 }
 
+/**
+ * 捕获 Pool 当前所有 Lane 的槽位边界。
+ *
+ * @param pool 需要记录槽位几何信息的 Pool。
+ * @returns 当前 Pool 内每个 Lane 的原始边界快照。
+ */
 export function captureLaneSlotBounds(pool: PoolModel): LaneSlotBounds[] {
-  // 保留原始几何信息，避免预览动画改变槽位的命中区域。
   return pool.getOrderedLanes().map((lane: LaneModel) => {
     const { minX, minY, maxX, maxY } = lane.getBounds()
     return { laneId: lane.id, minX, minY, maxX, maxY }
   })
 }
 
+/**
+ * 获取一次拖拽内稳定的 Pool 槽位边界。
+ *
+ * 每个 Pool 的槽位在一次拖拽内只采集一次，后续预览移动 Lane 不会污染命中区。
+ *
+ * @param context 单 Lane 拖拽所需的宿主能力和状态访问器。
+ * @param pool 当前需要命中的 Pool。
+ * @returns 本次拖拽使用的稳定槽位边界。
+ */
 export function getLaneSlotBounds(
   context: PoolLaneDragContext,
   pool: PoolModel,
@@ -85,11 +119,17 @@ export function getLaneSlotBounds(
   return state.slotBoundsByPool[pool.id]
 }
 
+/**
+ * 获取单 Lane 拖拽时需要作为可视整体抬层的节点。
+ *
+ * @param context LogicFlow 宿主上下文。
+ * @param lane 当前拖拽的 Lane。
+ * @returns Lane 本身及其直接子节点。
+ */
 export function getLaneDragMembers(
   context: PoolLaneDragContext,
   lane: LaneModel,
 ): BaseNodeModel[] {
-  // 拖拽泳道时，泳道和其直接子节点需要作为一个可视整体处理。
   return ([lane] as BaseNodeModel[]).concat(
     Array.from(lane.children)
       .map((childId) => context.lf.getNodeModelById(childId))
@@ -97,6 +137,13 @@ export function getLaneDragMembers(
   )
 }
 
+/**
+ * 获取与 Lane 直接子节点相连的边。
+ *
+ * @param context LogicFlow 宿主上下文。
+ * @param lane 当前 Lane。
+ * @returns 与 Lane 子节点相连的业务边。
+ */
 export function getLaneRelatedEdges(
   context: PoolLaneDragContext,
   lane: LaneModel,
@@ -107,6 +154,12 @@ export function getLaneRelatedEdges(
   })
 }
 
+/**
+ * 抬高 Lane、关联边和子节点层级，避免拖拽时被 Pool/Lane 背景遮挡。
+ *
+ * @param context LogicFlow 宿主上下文。
+ * @param lane 需要抬层的 Lane。
+ */
 export function raiseLaneRelatedElements(
   context: PoolLaneDragContext,
   lane: LaneModel,
@@ -127,6 +180,13 @@ export function raiseLaneRelatedElements(
     .forEach((member) => member.setZIndex(topZIndex + 3))
 }
 
+/**
+ * 将新增或拖拽中的 Lane 子节点同步到正确层级。
+ *
+ * @param context LogicFlow 宿主上下文。
+ * @param lane 子节点所属 Lane。
+ * @param childId 需要同步层级的子节点 id。
+ */
 export function syncLaneChildZIndex(
   context: PoolLaneDragContext,
   lane: LaneModel,
@@ -160,6 +220,17 @@ export function syncLaneChildZIndex(
   }
 }
 
+/**
+ * 创建或复用单 Lane 拖拽快照。
+ *
+ * 同一次拖拽的后续 mousemove 复用首帧快照，不能被预览布局反复刷新。
+ *
+ * @param context 单 Lane 拖拽上下文。
+ * @param lane 当前拖拽的 Lane。
+ * @param sourcePool Lane 开始拖拽时所属的 Pool。
+ * @param previousAxis 指针在 Pool 主轴上的初始坐标。
+ * @returns 当前拖拽状态快照。
+ */
 export function createLaneDragState(
   context: PoolLaneDragContext,
   lane: LaneModel,
@@ -205,6 +276,12 @@ export function createLaneDragState(
   return state
 }
 
+/**
+ * 将拖拽开始前记录的文本坐标恢复到节点/边上。
+ *
+ * @param context LogicFlow 宿主上下文。
+ * @param state 当前 Lane 拖拽快照。
+ */
 export function restoreLaneTextPositions(
   context: PoolLaneDragContext,
   state: LaneDragState,
@@ -217,6 +294,12 @@ export function restoreLaneTextPositions(
   })
 }
 
+/**
+ * 设置 Lane 拖拽时的全局 cursor 反馈样式。
+ *
+ * @param context LogicFlow 宿主上下文。
+ * @param cursor 允许、禁止，或清除状态。
+ */
 export function setLaneDragCursor(
   context: PoolLaneDragContext,
   cursor?: 'not-allowed' | 'allowed',
@@ -227,6 +310,11 @@ export function setLaneDragCursor(
   }
 }
 
+/**
+ * 清理 Pool 上的 Lane drop 目标态和 indicator。
+ *
+ * @param pool 需要清理的目标 Pool；为空时不执行操作。
+ */
 export function clearLaneDropTarget(pool?: PoolModel) {
   if (!pool) return
   pool.isLaneDropTarget = false
@@ -234,6 +322,13 @@ export function clearLaneDropTarget(pool?: PoolModel) {
   pool.setAllowAppendChild(false)
 }
 
+/**
+ * 判断单 Lane 是否可以从 sourcePool 投放到 targetPool。
+ *
+ * @param sourcePool Lane 当前所属的 Pool。
+ * @param targetPool 指针命中的目标 Pool。
+ * @returns 是否允许当前迁移或同池换序。
+ */
 export function canDropLaneIntoPool(
   sourcePool: PoolModel,
   targetPool: PoolModel,
@@ -241,6 +336,17 @@ export function canDropLaneIntoPool(
   return targetPool.id === sourcePool.id || sourcePool.canRemoveLane(1)
 }
 
+/**
+ * 根据指针所在槽位计算单 Lane 的目标插入下标。
+ *
+ * @param context 单 Lane 拖拽上下文。
+ * @param pool 指针命中的目标 Pool。
+ * @param lane 当前拖拽的 Lane。
+ * @param point 当前指针的画布坐标。
+ * @param previousAxis 上一次指针在 Pool 主轴上的坐标。
+ * @param slotBounds 本次拖拽开始时记录的槽位边界。
+ * @returns 目标 Pool 中的插入下标。
+ */
 export function getLanePointerInsertIndex(
   context: PoolLaneDragContext,
   pool: PoolModel,
@@ -289,6 +395,15 @@ export function getLanePointerInsertIndex(
   return lanes.findIndex((candidate) => candidate.id === lane.id)
 }
 
+/**
+ * 获取单 Lane 预览时的 Lane 顺序。
+ *
+ * @param context 单 Lane 拖拽上下文。
+ * @param pool 目标 Pool。
+ * @param laneId 当前拖拽的 Lane id。
+ * @param insertIndex 目标插入下标。
+ * @returns 预览状态下的 Lane id 顺序。
+ */
 export function getLanePreviewOrder(
   context: PoolLaneDragContext,
   pool: PoolModel,
@@ -299,6 +414,14 @@ export function getLanePreviewOrder(
   return lane ? context.getLaneBlockPreviewOrder(pool, [lane], insertIndex) : []
 }
 
+/**
+ * 设置单 Lane drop indicator。
+ *
+ * @param context 单 Lane 拖拽上下文。
+ * @param pool 目标 Pool。
+ * @param laneId 当前拖拽的 Lane id。
+ * @param insertIndex 目标插入下标。
+ */
 export function setLaneDropIndicator(
   context: PoolLaneDragContext,
   pool: PoolModel,
@@ -310,6 +433,14 @@ export function setLaneDropIndicator(
   context.setLaneBlockDropIndicator(pool, [lane], insertIndex)
 }
 
+/**
+ * 预览单 Lane 在目标 Pool 中的排序效果。
+ *
+ * @param context 单 Lane 拖拽上下文。
+ * @param pool 目标 Pool。
+ * @param laneId 当前拖拽的 Lane id。
+ * @param insertIndex 目标插入下标。
+ */
 export function previewLaneOrder(
   context: PoolLaneDragContext,
   pool: PoolModel,
@@ -322,6 +453,15 @@ export function previewLaneOrder(
   context.previewLaneBlockOrder(pool, [lane], insertIndex)
 }
 
+/**
+ * 根据 node:drag 的指针位置更新单 Lane 拖拽预览。
+ *
+ * 该阶段只更新预览状态，不真正修改 Lane 归属。
+ *
+ * @param context 单 Lane 拖拽上下文。
+ * @param laneId 当前拖拽的 Lane id。
+ * @param point 当前指针的画布坐标。
+ */
 export function updateLaneDragPreview(
   context: PoolLaneDragContext,
   laneId: string,
@@ -378,11 +518,15 @@ export function updateLaneDragPreview(
   }
 }
 
+/**
+ * 清理单 Lane 拖拽预览，并恢复拖拽前的层级。
+ *
+ * @param context 单 Lane 拖拽上下文。
+ */
 export function clearLaneDragPreview(context: PoolLaneDragContext) {
   const state = context.getLaneDragState()
   if (!state) return
 
-  // 拖拽结束或取消后，恢复拖拽开始前记录的层级。
   Object.entries(state.originalRaisedElementZIndices).forEach(
     ([id, zIndex]) => {
       const element =
@@ -404,6 +548,14 @@ export function clearLaneDragPreview(context: PoolLaneDragContext) {
   context.setLaneDragState(undefined)
 }
 
+/**
+ * 将无效投放的 Lane 归位到来源 Pool。
+ *
+ * @param context 单 Lane 拖拽上下文。
+ * @param lane 需要归位的 Lane。
+ * @param sourcePool Lane 原本所属的 Pool。
+ * @param state 当前拖拽快照，用于恢复 title 和其他临时状态。
+ */
 export function returnLaneToSourcePool(
   context: PoolLaneDragContext,
   lane: LaneModel,
@@ -430,6 +582,15 @@ export function returnLaneToSourcePool(
   setTimeout(layout, 0)
 }
 
+/**
+ * node:drop 的单 Lane 落位出口。
+ *
+ * 根据拖拽预览快照决定同池换序、跨 Pool 迁移或失败归位。
+ *
+ * @param context 单 Lane 拖拽上下文。
+ * @param node drop 事件携带的节点数据。
+ * @returns 是否完成了有效落位。
+ */
 export function finalizeLaneDrop(
   context: PoolLaneDragContext,
   node?: LogicFlow.NodeData,

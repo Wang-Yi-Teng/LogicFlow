@@ -260,6 +260,12 @@ export class SelectionSelect {
     }
   }
 
+  /**
+   * 查询节点的直接容器。
+   *
+   * 框选插件不认识具体容器类型，因此按历史 group → DynamicGroup → Pool/Lane 的
+   * 兼容顺序向宿主查询。
+   */
   private getParentContainerByNodeId(
     nodeId: string,
   ): LogicFlow.GraphElement | undefined {
@@ -279,6 +285,11 @@ export class SelectionSelect {
     }
   }
 
+  /**
+   * 查询节点的祖先容器链。
+   *
+   * 宿主如果能返回完整祖先链，就用祖先链过滤父子同时选中；否则退化为只看直接父容器。
+   */
   private getAncestorContainersByNodeId(
     nodeId: string,
   ): LogicFlow.GraphElement[] {
@@ -362,7 +373,7 @@ export class SelectionSelect {
         if (
           ancestorContainers.some((ancestor) => elements.includes(ancestor))
         ) {
-          // 当被选中元素的任一祖先容器被选中时，不再选中该元素。
+          // 当被选中元素的任一祖先容器也在框选范围内时，只保留祖先容器，避免父子重复拖拽。
           return
         }
         // 在独占模式下，如果元素已经被选中，则取消选中

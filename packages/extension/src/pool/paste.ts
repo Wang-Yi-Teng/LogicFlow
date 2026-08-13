@@ -17,21 +17,36 @@ import GraphElements = LogicFlow.GraphElements
 import EdgeConfig = LogicFlow.EdgeConfig
 import EdgeData = LogicFlow.EdgeData
 
+/**
+ * PoolElements 对 lf.addElements 的复制/粘贴实现。
+ *
+ * 这里把“普通 group 复制”和“Lane/Pool 语义复制”放在同一个入口处理：
+ * - 复制 Lane 时，优先粘贴进当前唯一选中的目标 Pool；
+ * - 没有唯一目标 Pool 时，空白粘贴自动创建一个只包含复制 Lane 的新 Pool；
+ * - 内部子节点和边会重新建立 id 映射，避免复用旧路径造成线断开或 title 偏移。
+ */
+
 type ElementsInfoInGroup = {
   childNodes: BaseNodeModel[]
   edgesData: EdgeData[]
 }
 
 type PasteContext = {
+  /** 源节点 id 到复制后节点 id 的映射，后续用于重建内部边。 */
   nodeIdMap: Record<string, string>
+  /** addElements 最终返回给快捷键选中/偏移逻辑的元素集合。 */
   elements: GraphElements
+  /** 复制 group/lane 子树时收集到的内部边，等 nodeIdMap 完整后再统一创建。 */
   edgesInnerGroup: EdgeData[]
+  /** 一次空白粘贴多个 Lane 时复用同一个新 Pool，避免每个 Lane 建一个 Pool。 */
   blankPasteTargetPool?: PoolModel
+  /** 复制 Lane 后，子节点要按源 Lane 相对位置恢复，不能完全依赖整体 distance 平移。 */
   copiedLaneChildOffsets: Record<string, LaneChildRelativePositions>
   copiedLanes: LaneModel[]
 }
 
 export type PoolPasteContext = {
+  /** 由 PoolElements 注入宿主能力，paste.ts 不直接依赖插件实例。 */
   lf: LogicFlow
   nodeLaneMap: Map<string, string>
   resolvePoolById(poolId?: unknown): PoolModel | undefined
@@ -39,6 +54,14 @@ export type PoolPasteContext = {
   getRootContainerNodes(nodes: BaseNodeModel[]): BaseNodeModel[]
 }
 
+/**
+ * 移除节点数据中的 children 字段。
+ *
+ * addNode 只负责创建当前节点；children 由 initGroupChildNodes 递归复制，避免父子重复创建。
+ *
+ * @param nodeData 当前节点配置或序列化数据。
+ * @returns 移除容器字段后的节点数据副本。
+ */
 function removeChildrenInGroupNodeData<
   T extends LogicFlow.NodeData | LogicFlow.NodeConfig,
 >(nodeData: T) {
@@ -50,6 +73,15 @@ function removeChildrenInGroupNodeData<
   return newNodeData
 }
 
+/**
+ * 从选中节点向上解析其所属 Pool。
+ *
+ * 选中 Pool、Lane 或 Lane 内普通节点时，都可以向上解析到目标 Pool。
+ *
+ * @param pasteContext 粘贴所需的宿主上下文。
+ * @param nodeId 当前选中节点 id。
+ * @returns 节点所属的 Pool；无法解析时返回 undefined。
+ */
 function resolveNodePool(
   pasteContext: PoolPasteContext,
   nodeId: string,
@@ -67,6 +99,14 @@ function resolveNodePool(
     | undefined
 }
 
+/**
+ * 根据当前选中态解析 Lane 粘贴目标 Pool。
+ *
+ * 只有当前选中态能唯一归属到一个 Pool 时，Lane 才粘贴进该 Pool；多 Pool/无 Pool 走空白粘贴。
+ *
+ * @param pasteContext 粘贴所需的宿主上下文。
+ * @returns 当前唯一的粘贴目标 Pool；无唯一目标时返回 undefined。
+ */
 function resolvePasteTargetPool(
   pasteContext: PoolPasteContext,
 ): PoolModel | undefined {
@@ -84,6 +124,19 @@ function resolvePasteTargetPool(
     | undefined
 }
 
+/**
+ * 为空白粘贴 Lane 创建目标 Pool。
+ *
+ * 新 Pool 会按源 Pool 的方向、标题位置和 Lane 展开尺寸推导尺寸。
+ *
+ * @param pasteContext 粘贴所需的宿主上下文。
+ * @param node 源 Lane 数据。
+ * @param laneId 即将创建的 Lane id，用于建立 Pool children。
+ * @param laneWidth 新 Lane 的展开宽度。
+ * @param laneHeight 新 Lane 的展开高度。
+ * @param distance 粘贴操作相对源节点的偏移量。
+ * @returns 新创建的 Pool 模型。
+ */
 function createPasteTargetPool(
   pasteContext: PoolPasteContext,
   node: LogicFlow.NodeData | LogicFlow.NodeConfig,
@@ -131,6 +184,16 @@ function createPasteTargetPool(
   }) as PoolModel
 }
 
+/**
+ * 递归复制当前 group/lane 的所有子节点，并收集子树内部边。
+ *
+ * @param pasteContext 粘贴所需的宿主上下文。
+ * @param nodeIdMap 源节点 id 到复制节点 id 的映射表。
+ * @param children 当前容器的子节点 id 集合。
+ * @param curGroup 当前复制出的容器模型。
+ * @param distance 粘贴偏移量。
+ * @returns 复制出的子节点和待重建的内部边。
+ */
 function initGroupChildNodes(
   pasteContext: PoolPasteContext,
   nodeIdMap: Record<string, string>,
@@ -204,6 +267,17 @@ function initGroupChildNodes(
   }
 }
 
+/**
+ * 根据 nodeIdMap 创建复制后的边。
+ *
+ * 内部边会替换为新节点 id；连接选区外节点的边只按快捷键粘贴距离平移。
+ *
+ * @param pasteContext 粘贴所需的宿主上下文。
+ * @param edge 源边数据。
+ * @param nodeIdMap 源节点 id 到复制节点 id 的映射表。
+ * @param distance 粘贴偏移量。
+ * @returns 新创建的边模型。
+ */
 function createEdge(
   pasteContext: PoolPasteContext,
   edge: EdgeConfig | EdgeData,
@@ -219,6 +293,7 @@ function createEdge(
   // 复制出来的内部边会连接到重新布局后的子节点，旧路径点不能再平移复用。
   let newEdgeConfig = cloneDeep(edge)
   if (isCopiedInternalEdge) {
+    // 内部边连接到新子节点后，旧路径/锚点已经不可信，交给图模型按新端点重新计算。
     const edgeConfig = newEdgeConfig as any
     const { text } = edgeConfig
     delete edgeConfig.startPoint
@@ -254,6 +329,17 @@ function createEdge(
   return edgeModel
 }
 
+/**
+ * 复制 Lane 节点及其子树。
+ *
+ * Lane 是 Pool 的结构子节点：复制 Lane 时需要先确定目标 Pool，再创建 Lane 和其子树。
+ *
+ * @param pasteContext 粘贴所需的宿主上下文。
+ * @param node 源 Lane 数据。
+ * @param children 源 Lane 的子节点集合。
+ * @param distance 粘贴偏移量。
+ * @param context 本次 addElements 的复制上下文。
+ */
 function pasteLaneNode(
   pasteContext: PoolPasteContext,
   node: LogicFlow.NodeData | LogicFlow.NodeConfig,
@@ -271,6 +357,7 @@ function pasteLaneNode(
   const laneWidth = sourceLane?.expandWidth ?? (node as any).width
   const laneHeight = sourceLane?.expandHeight ?? (node as any).height
   const selectedTargetPool = resolvePasteTargetPool(pasteContext)
+  // 没有选中目标 Pool 时，提前生成 laneId 让新 Pool 的 children 能直接指向它。
   const generatedLaneId = selectedTargetPool ? undefined : createUuid()
   const targetPool =
     selectedTargetPool ??
@@ -341,6 +428,15 @@ function pasteLaneNode(
   targetPool.layoutLanesByOrder({ reason: 'add' })
 }
 
+/**
+ * 复制普通节点、Pool 或非 Lane 的 group 节点。
+ *
+ * @param pasteContext 粘贴所需的宿主上下文。
+ * @param node 源节点数据。
+ * @param children 源容器的子节点集合。
+ * @param distance 粘贴偏移量。
+ * @param context 本次 addElements 的复制上下文。
+ */
 function pasteCommonNode(
   pasteContext: PoolPasteContext,
   node: LogicFlow.NodeData | LogicFlow.NodeConfig,
@@ -372,6 +468,14 @@ function pasteCommonNode(
   }
 }
 
+/**
+ * 创建 PoolElements 的 addElements 覆盖实现。
+ *
+ * 快捷键粘贴和外部 API 都会进入该入口，最终返回值会被 core 用于选中和整体偏移。
+ *
+ * @param pasteContext PoolElements 提供的粘贴宿主上下文。
+ * @returns 可直接赋值给 lf.addElements 的函数。
+ */
 export function createPoolAddElements(
   pasteContext: PoolPasteContext,
 ): LogicFlow['addElements'] {
@@ -405,6 +509,7 @@ export function createPoolAddElements(
     })
 
     context.copiedLanes.forEach((lane) => {
+      // Pool layout 可能先移动 Lane，最后再按源 Lane 的相对偏移修正子节点位置。
       lane.restoreChildrenRelativePositions(
         context.copiedLaneChildOffsets[lane.id] ?? {},
       )

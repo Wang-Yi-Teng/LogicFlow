@@ -91,6 +91,11 @@ const baseNodes = [
 const isPoolMode = computed(() => pluginMode.value !== 'dynamic-group-only')
 const isDynamicGroupMode = computed(() => pluginMode.value !== 'pool')
 
+/**
+ * Pool/Lane 行为回归工作台。
+ *
+ * 场景数据保持小而固定，便于复现拖拽、折叠和复制粘贴问题。
+ */
 function createDynamicGroupGraph(): LogicFlow.GraphConfigData {
   return {
     nodes: [
@@ -618,6 +623,11 @@ function logGraphData() {
 }
 
 function buildPlugins() {
+  /**
+   * 组装当前工作台的插件列表。
+   *
+   * compare 模式用于同时挂载 DynamicGroup 与 PoolElements，观察二者全局重写能力是否互相影响。
+   */
   if (pluginMode.value === 'dynamic-group-only') {
     return [DynamicGroup, SelectionSelect, Control]
   }
@@ -689,6 +699,9 @@ function mountWorkbenchLf() {
   registerEvents(lf)
   lf.render(getInitialGraph())
   lfRef.value = lf
+  /**
+   * 暴露 LogicFlow 实例到 window，方便验收时在控制台直接调用常用 API。
+   */
   window.poolLaneLf = lf
   if (typeof ResizeObserver !== 'undefined') {
     resizeObserver = new ResizeObserver(() => {
