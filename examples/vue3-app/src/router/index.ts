@@ -38,6 +38,11 @@ const router = createRouter({
       path: '/selection-pool-conflict',
       name: 'selectionPoolConflict',
       component: () => import('../views/SelectionPoolConflictView.vue')
+    },
+    {
+      path: '/pool-lane-workbench',
+      name: 'poolLaneWorkbench',
+      component: () => import('../views/PoolLaneWorkbenchView.vue')
     }
   ]
 })
