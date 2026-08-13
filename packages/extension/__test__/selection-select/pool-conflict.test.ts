@@ -112,6 +112,49 @@ function createDynamicGroupWithChild() {
   }
 }
 
+function createNestedDynamicGroupWithChild() {
+  return {
+    nodes: [
+      {
+        id: 'outer_group',
+        type: 'dynamic-group',
+        x: 500,
+        y: 260,
+        text: '外层分组',
+        properties: {
+          width: 640,
+          height: 460,
+          children: ['inner_group'],
+        },
+        children: ['inner_group'],
+      },
+      {
+        id: 'inner_group',
+        type: 'dynamic-group',
+        x: 500,
+        y: 260,
+        text: '内层分组',
+        properties: {
+          width: 320,
+          height: 220,
+          children: ['rect_1'],
+        },
+        children: ['rect_1'],
+      },
+      {
+        id: 'rect_1',
+        type: 'rect',
+        x: 530,
+        y: 260,
+        width: 80,
+        height: 40,
+        text: '普通节点',
+      },
+    ],
+    edges: [],
+  }
+}
+
 function finishSelection(
   lf: LogicFlow,
   start: LogicFlow.Position,
@@ -163,6 +206,51 @@ describe('selection-select with PoolElements', () => {
     expect(rect.isSelected).toBe(false)
   })
 
+  test('removes a Pool descendant when its ancestor is already selected', () => {
+    const lf = createSelectionPoolLF()
+    lf.render(createPoolWithNodeInLane())
+
+    const plugin = lf.extension.PoolElements as any
+    const pool = lf.getNodeModelById('pool_1')!
+    const lane = lf.getNodeModelById('lane_1')!
+    const rect = lf.getNodeModelById('rect_1')!
+
+    pool.setSelected(true)
+    rect.setSelected(true)
+    plugin.onNodeSelect({
+      data: rect.getData(),
+      isMultiple: true,
+      isSelected: true,
+    })
+
+    expect(pool.isSelected).toBe(true)
+    expect(lane.isSelected).toBe(false)
+    expect(rect.isSelected).toBe(false)
+  })
+
+  test('removes selected Pool descendants when their ancestor is selected', () => {
+    const lf = createSelectionPoolLF()
+    lf.render(createPoolWithNodeInLane())
+
+    const plugin = lf.extension.PoolElements as any
+    const pool = lf.getNodeModelById('pool_1')!
+    const lane = lf.getNodeModelById('lane_1')!
+    const rect = lf.getNodeModelById('rect_1')!
+
+    lane.setSelected(true)
+    rect.setSelected(true)
+    pool.setSelected(true)
+    plugin.onNodeSelect({
+      data: pool.getData(),
+      isMultiple: true,
+      isSelected: true,
+    })
+
+    expect(pool.isSelected).toBe(true)
+    expect(lane.isSelected).toBe(false)
+    expect(rect.isSelected).toBe(false)
+  })
+
   test('keeps DynamicGroup parent-child deduplication behavior', () => {
     const lf = createSelectionDynamicGroupLF()
     lf.render(createDynamicGroupWithChild())
@@ -174,5 +262,39 @@ describe('selection-select with PoolElements', () => {
 
     expect(group.isSelected).toBe(true)
     expect(rect.isSelected).toBe(false)
+  })
+
+  test('removes a nested DynamicGroup descendant when its ancestor is already selected', () => {
+    const lf = createSelectionDynamicGroupLF()
+    lf.render(createNestedDynamicGroupWithChild())
+
+    const plugin = lf.extension.dynamicGroup as any
+    const outerGroup = lf.getNodeModelById('outer_group')!
+    const innerGroup = lf.getNodeModelById('inner_group')!
+    const rect = lf.getNodeModelById('rect_1')!
+
+    outerGroup.setSelected(true)
+    rect.setSelected(true)
+    plugin.onNodeSelect({
+      data: rect.getData(),
+      isMultiple: true,
+      isSelected: true,
+    })
+
+    expect(outerGroup.isSelected).toBe(true)
+    expect(innerGroup.isSelected).toBe(false)
+    expect(rect.isSelected).toBe(false)
+  })
+
+  test('does not select a nested DynamicGroup descendant while its ancestor is selected', () => {
+    const lf = createSelectionDynamicGroupLF()
+    lf.render(createNestedDynamicGroupWithChild())
+
+    lf.getNodeModelById('outer_group')!.setSelected(true)
+    finishSelection(lf, { x: 480, y: 240 }, { x: 590, y: 290 })
+
+    expect(lf.getNodeModelById('outer_group')!.isSelected).toBe(true)
+    expect(lf.getNodeModelById('inner_group')!.isSelected).toBe(false)
+    expect(lf.getNodeModelById('rect_1')!.isSelected).toBe(false)
   })
 })

@@ -279,6 +279,18 @@ export class SelectionSelect {
     }
   }
 
+  private getAncestorContainersByNodeId(
+    nodeId: string,
+  ): LogicFlow.GraphElement[] {
+    const { dynamicGroup } = this.lf.graphModel
+    if (typeof dynamicGroup?.getAncestorContainersByNodeId === 'function') {
+      return dynamicGroup.getAncestorContainersByNodeId(nodeId)
+    }
+
+    const parentContainer = this.getParentContainerByNodeId(nodeId)
+    return parentContainer ? [parentContainer] : []
+  }
+
   private drawOff = (e: PointerEvent) => {
     // 恢复原始的 stopMoveGraph 设置
     this.lf.updateEditConfig({
@@ -344,9 +356,13 @@ export class SelectionSelect {
       ])
 
       elements.forEach((element) => {
-        const parentContainer = this.getParentContainerByNodeId(element.id)
-        if (parentContainer && elements.includes(parentContainer)) {
-          // 当被选中的元素的父容器被选中时，不选中该元素
+        const ancestorContainers = this.getAncestorContainersByNodeId(
+          element.id,
+        )
+        if (
+          ancestorContainers.some((ancestor) => elements.includes(ancestor))
+        ) {
+          // 当被选中元素的任一祖先容器被选中时，不再选中该元素。
           return
         }
         // 在独占模式下，如果元素已经被选中，则取消选中

@@ -2,14 +2,37 @@
  * 基于DynamicGroup重新实现的泳道节点组件
  * 继承DynamicGroupNodeModel和DynamicGroupNode，提供泳道特定功能
  */
-import LogicFlow from '@logicflow/core'
+import LogicFlow, { observable } from '@logicflow/core'
 import { DynamicGroupNodeModel } from '../dynamic-group'
 import { forEach } from 'lodash-es'
-import { laneConfig } from './constant'
+import { laneConfig, TitlePosition } from './constant'
+import { getTitleLayout, resolveLaneTitlePosition } from './utils'
+
+export type LaneChildRelativePositions = Record<
+  string,
+  { dx: number; dy: number }
+>
+
+export function mapLaneChildRelativePositions(
+  sourcePositions: LaneChildRelativePositions,
+  nodeIdMap: Record<string, string>,
+): LaneChildRelativePositions {
+  return Object.entries(sourcePositions).reduce(
+    (positions, [sourceChildId, offset]) => {
+      const copiedChildId = nodeIdMap[sourceChildId]
+      if (copiedChildId) positions[copiedChildId] = offset
+      return positions
+    },
+    {} as LaneChildRelativePositions,
+  )
+}
 
 export class LaneModel extends DynamicGroupNodeModel {
   readonly isLane: boolean = true
+  titleSize: number = laneConfig.titleSize
   defaultZIndex: number = -1
+  @observable isLaneReordering: boolean = false
+  @observable isLaneReturning: boolean = false
 
   initNodeData(data: LogicFlow.NodeConfig) {
     super.initNodeData(data)
@@ -39,11 +62,11 @@ export class LaneModel extends DynamicGroupNodeModel {
       direction: data.properties?.direction || 'vertical',
     }
 
-    // 设置折叠尺寸（泳道不支持折叠，设置为与正常尺寸相同）
-    this.collapsedWidth = this.width
-    this.collapsedHeight = this.height
-    this.expandWidth = this.width
-    this.expandHeight = this.height
+    // 折叠态数据需要保留展开尺寸，序列化后重新渲染才能正确恢复。
+    this.collapsedWidth = data.properties?.collapsedWidth ?? this.width
+    this.collapsedHeight = data.properties?.collapsedHeight ?? this.height
+    this.expandWidth = data.properties?.expandWidth ?? this.width
+    this.expandHeight = data.properties?.expandHeight ?? this.height
   }
 
   setAttributes(): void {
@@ -51,17 +74,100 @@ export class LaneModel extends DynamicGroupNodeModel {
     this.updateTextPosition()
   }
 
+  getResolvedTitlePosition() {
+    return resolveLaneTitlePosition(
+      this.properties,
+      this.getPoolModel()?.properties ?? {
+        direction: this.properties?.direction,
+      },
+    )
+  }
+
+  getTitleTextBox() {
+    if (this.isCollapsed) {
+      return { x: this.x, y: this.y, width: this.width, height: this.height }
+    }
+    return getTitleLayout(
+      { x: this.x, y: this.y, width: this.width, height: this.height },
+      this.getResolvedTitlePosition(),
+      this.titleSize,
+    ).titleBox
+  }
+
+  isTitleTextVerticallyCentered() {
+    return true
+  }
+
+  /** 折叠 Lane 已经是完整标题块，文字不再沿展开态标题边旋转。 */
+  getTitleRenderPosition(): TitlePosition {
+    if (!this.isCollapsed) return this.getResolvedTitlePosition()
+    return this.getPoolModel()?.isHorizontal ? 'top' : 'left'
+  }
+
   setZIndex(zIndex: number) {
+    if (zIndex > this.defaultZIndex) {
+      this.zIndex = zIndex
+      return
+    }
     this.zIndex = Math.min(zIndex, this.defaultZIndex) || this.defaultZIndex
   }
 
-  /**
-   * 重写折叠方法 - 泳道不支持折叠
-   */
-  toggleCollapse() {
-    // 泳道不支持折叠功能，保持展开状态
-    this.isCollapsed = false
-    this.setProperties({ isCollapsed: false })
+  getOuterGAttributes() {
+    const attributes = super.getOuterGAttributes()
+    return {
+      ...attributes,
+      // 仅在排序预览或非法投放归位期间启用过渡，正常移动不能带动画滞后。
+      className:
+        this.isLaneReordering || this.isLaneReturning
+          ? 'lf-lane-reordering'
+          : '',
+    }
+  }
+
+  toggleCollapse(collapse?: boolean) {
+    const plugin = this.graphModel.dynamicGroup as any
+    if (
+      typeof plugin?.isCollapseAllowed === 'function' &&
+      !plugin.isCollapseAllowed(this)
+    ) {
+      this.isCollapsed = false
+      this.setProperties({ ...this.properties, isCollapsed: false })
+      return
+    }
+
+    const next = typeof collapse === 'boolean' ? collapse : !this.isCollapsed
+    if (next === this.isCollapsed) return
+
+    if (next) {
+      this.setCollapsedSizeForDirection(this.width, this.height)
+    }
+
+    super.toggleCollapse(next)
+    const pool = this.getPoolModel()
+    if (!pool?.isSyncingPoolCollapse) {
+      pool?.layoutLanesByOrder?.({ reason: 'collapse' })
+    }
+  }
+
+  /** 已折叠 Lane 的标题边变更不改变折叠轴，仍按所属 Pool 的排列方向保留标题块。 */
+  refreshCollapsedTitleBounds() {
+    if (!this.isCollapsed) return
+
+    this.setCollapsedSizeForDirection(this.expandWidth, this.expandHeight)
+    this.width = this.collapsedWidth
+    this.height = this.collapsedHeight
+    this.updateTextPosition()
+  }
+
+  private setCollapsedSizeForDirection(
+    expandedWidth: number,
+    expandedHeight: number,
+  ) {
+    const isHorizontalPool =
+      this.getPoolModel()?.isHorizontal ??
+      this.properties?.direction === 'horizontal'
+    this.collapsedWidth = isHorizontalPool ? expandedWidth : this.titleSize
+    this.collapsedHeight = isHorizontalPool ? this.titleSize : expandedHeight
   }
 
   /**
@@ -132,6 +238,10 @@ export class LaneModel extends DynamicGroupNodeModel {
         ...data.properties,
         width: this.width,
         height: this.height,
+        expandWidth: this.expandWidth,
+        expandHeight: this.expandHeight,
+        collapsedWidth: this.collapsedWidth,
+        collapsedHeight: this.collapsedHeight,
         processRef: this.properties.processRef,
         direction: this.properties.direction,
       },
@@ -145,19 +255,81 @@ export class LaneModel extends DynamicGroupNodeModel {
     return String(nodeData.type) !== 'lane'
   }
 
+  getMovableChildIds() {
+    return Array.from(this.children).filter((nodeId: string) => {
+      const nodeModel = this.graphModel.getNodeModelById(nodeId)
+      return (
+        nodeModel && !nodeModel.isDragging && String(nodeModel.type) !== 'lane'
+      )
+    }) as string[]
+  }
+
+  captureChildrenRelativePositions(
+    childIds: string[] = this.getMovableChildIds(),
+  ): LaneChildRelativePositions {
+    return childIds.reduce((positions, childId) => {
+      const child = this.graphModel.getNodeModelById(childId)
+      if (child) {
+        positions[childId] = {
+          dx: child.x - this.x,
+          dy: child.y - this.y,
+        }
+      }
+      return positions
+    }, {} as LaneChildRelativePositions)
+  }
+
+  restoreChildrenRelativePositions(positions: LaneChildRelativePositions) {
+    const moves = Object.entries(positions)
+      .map(([childId, offset]) => {
+        const child = this.graphModel.getNodeModelById(childId)
+        if (!child) return undefined
+        const targetX = this.x + offset.dx
+        const targetY = this.y + offset.dy
+        return {
+          childId,
+          targetX,
+          targetY,
+          deltaX: targetX - child.x,
+          deltaY: targetY - child.y,
+        }
+      })
+      .filter(Boolean) as Array<{
+      childId: string
+      targetX: number
+      targetY: number
+      deltaX: number
+      deltaY: number
+    }>
+    const moved = moves.filter(({ deltaX, deltaY }) => deltaX || deltaY)
+    if (moved.length === 0) return
+
+    const [first] = moved
+    const hasSameDelta = moved.every(
+      ({ deltaX, deltaY }) =>
+        deltaX === first.deltaX && deltaY === first.deltaY,
+    )
+    if (hasSameDelta) {
+      this.graphModel.moveNodes(
+        moved.map(({ childId }) => childId),
+        first.deltaX,
+        first.deltaY,
+        true,
+      )
+      return
+    }
+
+    moved.forEach(({ childId, targetX, targetY }) => {
+      this.graphModel.moveNode2Coordinate(childId, targetX, targetY, true)
+    })
+  }
+
   /**
    * 获取需要移动的节点
    * @param groupModel
    */
   getNodesInGroup(groupModel: DynamicGroupNodeModel): string[] {
     const nodeIds: string[] = []
-    const {
-      properties: { parent },
-      isDragging,
-    } = groupModel
-    if (isDragging && parent) {
-      nodeIds.push(parent as string)
-    }
     forEach(Array.from(groupModel.children), (nodeId: string) => {
       const nodeModel = this.graphModel.getNodeModelById(nodeId)
       // 只有非 Lane 类型的节点才会被带动
@@ -180,16 +352,30 @@ export class LaneModel extends DynamicGroupNodeModel {
    * 获取文本样式
    */
   getTextStyle() {
-    const { isHorizontal = false } = this.properties
     const style = super.getTextStyle()
+    const titleLayout = getTitleLayout(
+      { x: this.x, y: this.y, width: this.width, height: this.height },
+      this.getResolvedTitlePosition(),
+      this.titleSize,
+    )
+    const titlePosition = this.getTitleRenderPosition()
+    const isVerticalTitle =
+      titlePosition === 'left' || titlePosition === 'right'
+
     style.overflowMode = 'ellipsis'
     style.strokeWidth = 2
-    style.textWidth = isHorizontal ? this.height : this.width
-    style.textHeight = isHorizontal ? this.width : this.height
-    if (isHorizontal) {
+    style.textWidth = isVerticalTitle
+      ? titleLayout.titleBox.height
+      : titleLayout.titleBox.width
+    style.textHeight = isVerticalTitle
+      ? titleLayout.titleBox.width
+      : titleLayout.titleBox.height
+    if (isVerticalTitle) {
       style.transform = 'rotate(-90deg)'
-      style.textAlign = 'center'
+    } else if ('transform' in style) {
+      delete style.transform
     }
+    style.textAlign = 'center'
     return style
   }
 
@@ -208,18 +394,32 @@ export class LaneModel extends DynamicGroupNodeModel {
   }
 
   /**
-   * 初始化文本位置 - 根据布局方向设置文本位置
+   * Lane 文本跟随解析后的标题边，避免仅靠旧 isHorizontal 分支导致四边标题错位。
    */
-  updateTextPosition() {
-    if (this.properties.isHorizontal) {
-      // 横向泳池：文本显示在左侧标题区域
-      this.text.x = this.x - this.width / 2 + laneConfig.titleSize / 2
-      this.text.y = this.y
-    } else {
-      // 纵向泳池：文本显示在顶部标题区域
-      this.text.x = this.x
-      this.text.y = this.y - this.height / 2 + laneConfig.titleSize / 2
+  setTextPosition() {
+    if (!this.text) return
+
+    const titleSize = this.titleSize || laneConfig.titleSize
+    const titleBox = this.getTitleTextBox()
+    const textAnchor = this.isCollapsed
+      ? { x: titleBox.x, y: titleBox.y }
+      : getTitleLayout(
+          { x: this.x, y: this.y, width: this.width, height: this.height },
+          this.getResolvedTitlePosition(),
+          titleSize,
+        ).textAnchor
+
+    if (this.text.x !== textAnchor.x || this.text.y !== textAnchor.y) {
+      this.text = {
+        ...this.text,
+        x: textAnchor.x,
+        y: textAnchor.y,
+      }
     }
+  }
+
+  updateTextPosition() {
+    this.setTextPosition()
   }
 }
 
